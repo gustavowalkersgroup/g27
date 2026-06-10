@@ -81,7 +81,7 @@ const int JOYSTICK_MAX = 1023;
 // eixo calibrado. Evita que ruído de um eixo parado "calibre" uma
 // faixa minúscula e faça o valor pular de 0 a 1023 com qualquer
 // tremida. Antes de calibrar, o eixo fica fixo em 0 (repouso).
-const int SPAN_MINIMO = 100;
+const int SPAN_MINIMO = 40;
 // MARGEM_PCT: porcentagem cortada em cada extremidade da faixa
 // aprendida, garantindo que o pedal alcance 0 e 1023 com folga.
 const float MARGEM_PCT = 0.03;
@@ -166,7 +166,7 @@ void setup() {
     // Pré-popula buffers e inicia min/max na leitura atual,
     // assim a calibração parte do ponto de repouso real
     for (int e = 0; e < 4; e++) {
-        int leitura = analogRead(eixos[e].pino);
+        int leitura = lerAnalogico(eixos[e].pino);
         for (int i = 0; i < AMOSTRAS; i++) {
             eixos[e].buf[i] = leitura;
         }
@@ -176,12 +176,27 @@ void setup() {
 }
 
 /*
+ * Leitura analógica sem "vazamento" entre canais.
+ * O ATmega32U4 tem UM ADC compartilhado por A0–A3; ao trocar de
+ * canal, o capacitor interno de sample-and-hold ainda guarda carga
+ * da leitura anterior, fazendo um pedal influenciar o outro
+ * (acelerador "vazando" no freio etc.), mesmo com tudo aterrado.
+ * Solução: após selecionar o canal, faz uma leitura descartável,
+ * espera o capacitor assentar e só então faz a leitura válida.
+ */
+int lerAnalogico(int pino) {
+    analogRead(pino);          // descartada: só troca o canal e carrega o S/H
+    delayMicroseconds(100);    // tempo de assentamento
+    return analogRead(pino);   // leitura válida
+}
+
+/*
  * Processa um eixo: filtra, atualiza calibração e converte a
  * leitura bruta para a faixa completa 0–1023.
  */
 void processarEixo(Eixo &e) {
     // 1. Média móvel
-    e.buf[idxBuf] = analogRead(e.pino);
+    e.buf[idxBuf] = lerAnalogico(e.pino);
     long soma = 0;
     for (int i = 0; i < AMOSTRAS; i++) soma += e.buf[i];
     int filtrado = soma / AMOSTRAS;
