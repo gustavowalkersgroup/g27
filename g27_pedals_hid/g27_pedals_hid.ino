@@ -15,11 +15,16 @@
  *   A2  →  Rotação Y   (Embreagem)
  *   A3  →  Rotação Z   (Freio de Mão)
  *
- * ── CALIBRAÇÃO AUTOMÁTICA ─────────────────────────────────────────
- *   Ao ligar, pise FUNDO em cada pedal uma vez e solte.
- *   O firmware aprende o mínimo/máximo reais de cada potenciômetro
- *   e estica a leitura para a faixa completa 0–1023.
- *   Enquanto um eixo não foi movido, ele fica em 0 (repouso).
+ * ── CALIBRAÇÃO ────────────────────────────────────────────────────
+ *   MODO MANUAL (padrão): cada eixo usa uma faixa FIXA definida em
+ *   CAL_MIN/CAL_MAX abaixo. Previsível: um eixo nunca influencia o
+ *   outro. Para descobrir os valores reais dos seus potenciômetros,
+ *   ligue DEBUG_SERIAL e leia os valores "brutos" no Monitor Serial
+ *   com o pedal solto e pisado, depois ajuste as constantes.
+ *
+ *   MODO AUTOMÁTICO (CALIBRACAO_AUTO = true): aprende min/max em
+ *   tempo real. Evite se houver ruído/vazamento entre canais — o
+ *   estiramento da faixa amplifica qualquer interferência.
  *
  *   Observação sobre 5V vs 3,3V: a leitura é RATIOMÉTRICA — o
  *   potenciômetro e o ADC usam a mesma referência (VCC), então a
@@ -47,7 +52,8 @@
  *
  * ── TESTE ─────────────────────────────────────────────────────────
  *   Win+R → joy.cpl → Propriedades
- *   Pise fundo em cada pedal uma vez (calibração) e teste.
+ *   No modo manual os pedais respondem imediatamente; no modo
+ *   automático, pise fundo em cada pedal uma vez (calibração).
  */
 
 #include <Joystick.h>
@@ -76,12 +82,23 @@ const int PINOS_BOTOES[NUM_BOTOES] = {2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16};
 const int JOYSTICK_MIN = 0;
 const int JOYSTICK_MAX = 1023;
 
-// ── Calibração automática ────────────────────────────────────────
-// SPAN_MINIMO: curso mínimo (em contagens ADC) para considerar o
-// eixo calibrado. Evita que ruído de um eixo parado "calibre" uma
-// faixa minúscula e faça o valor pular de 0 a 1023 com qualquer
-// tremida. Antes de calibrar, o eixo fica fixo em 0 (repouso).
-const int SPAN_MINIMO = 40;
+// ── Calibração ───────────────────────────────────────────────────
+// false = MANUAL (recomendado): usa as faixas fixas CAL_MIN/CAL_MAX.
+// true  = AUTOMÁTICA: aprende min/max em tempo real (sensível a
+//         ruído/vazamento — pode "misturar" os eixos).
+const bool CALIBRACAO_AUTO = false;
+
+// Faixas fixas do modo manual (valores BRUTOS do ADC, 0–1023).
+// Faixa generosa que funciona com a maioria dos pedais G27; leituras
+// fora dela são apenas saturadas no extremo. Para curso exato, meça
+// com DEBUG_SERIAL e ajuste. Ordem: Acel, Freio, Embreagem, F. Mão.
+const int CAL_MIN[4] = {  60,  60,  60,  60 };
+const int CAL_MAX[4] = { 960, 960, 960, 960 };
+
+// Parâmetros do modo automático:
+// SPAN_MINIMO: curso mínimo (contagens ADC) para considerar o eixo
+// calibrado; antes disso ele fica fixo em 0 (repouso).
+const int SPAN_MINIMO = 100;
 // MARGEM_PCT: porcentagem cortada em cada extremidade da faixa
 // aprendida, garantindo que o pedal alcance 0 e 1023 com folga.
 const float MARGEM_PCT = 0.03;
@@ -104,6 +121,7 @@ struct Eixo {
     int  minObs;     // menor valor já observado
     int  maxObs;     // maior valor já observado
     int  valor;      // saída final 0–1023
+    int  bruto;      // última leitura filtrada (para debug/calibração)
 };
 
 Eixo eixos[4] = {
@@ -194,34 +212,43 @@ int lerAnalogico(int pino) {
  * Processa um eixo: filtra, atualiza calibração e converte a
  * leitura bruta para a faixa completa 0–1023.
  */
-void processarEixo(Eixo &e) {
+void processarEixo(Eixo &e, int idx) {
     // 1. Média móvel
     e.buf[idxBuf] = lerAnalogico(e.pino);
     long soma = 0;
     for (int i = 0; i < AMOSTRAS; i++) soma += e.buf[i];
     int filtrado = soma / AMOSTRAS;
+    e.bruto = filtrado;
 
-    // 2. Atualiza limites aprendidos
-    if (filtrado < e.minObs) e.minObs = filtrado;
-    if (filtrado > e.maxObs) e.maxObs = filtrado;
+    int lo, hi;
 
-    int span = e.maxObs - e.minObs;
+    if (CALIBRACAO_AUTO) {
+        // 2a. Atualiza limites aprendidos
+        if (filtrado < e.minObs) e.minObs = filtrado;
+        if (filtrado > e.maxObs) e.maxObs = filtrado;
 
-    // 3. Eixo ainda não movido o suficiente → mantém em repouso (0)
-    if (span < SPAN_MINIMO) {
-        e.valor = 0;
-        return;
+        int span = e.maxObs - e.minObs;
+
+        // Eixo ainda não movido o suficiente → mantém em repouso (0)
+        if (span < SPAN_MINIMO) {
+            e.valor = 0;
+            return;
+        }
+
+        // Corta margem nas extremidades para garantir fundo de escala
+        int margem = (int)(span * MARGEM_PCT);
+        lo = e.minObs + margem;
+        hi = e.maxObs - margem;
+    } else {
+        // 2b. Faixa fixa: cada eixo só depende da própria constante
+        lo = CAL_MIN[idx];
+        hi = CAL_MAX[idx];
     }
-
-    // 4. Corta margem nas extremidades para garantir fundo de escala
-    int margem = (int)(span * MARGEM_PCT);
-    int lo = e.minObs + margem;
-    int hi = e.maxObs - margem;
 
     int v = constrain(filtrado, lo, hi);
     v = map(v, lo, hi, JOYSTICK_MIN, JOYSTICK_MAX);
 
-    // 5. Inversão de sentido (repouso = 0, fundo = 1023)
+    // 3. Inversão de sentido (repouso = 0, fundo = 1023)
     if (e.inverter) v = JOYSTICK_MAX - v;
 
     e.valor = v;
@@ -230,7 +257,7 @@ void processarEixo(Eixo &e) {
 void loop() {
     // ── 1. Processa os 4 eixos (filtro + calibração + inversão) ──
     for (int e = 0; e < 4; e++) {
-        processarEixo(eixos[e]);
+        processarEixo(eixos[e], e);
     }
     idxBuf = (idxBuf + 1) % AMOSTRAS;
 
@@ -258,9 +285,13 @@ void loop() {
         if (agora - ultimoDebug >= DEBUG_INTERVALO_MS) {
             ultimoDebug = agora;
             Serial.print(F("Acel="));  Serial.print(eixos[0].valor);
+            Serial.print(F("(")); Serial.print(eixos[0].bruto); Serial.print(F(")"));
             Serial.print(F(" Freio=")); Serial.print(eixos[1].valor);
+            Serial.print(F("(")); Serial.print(eixos[1].bruto); Serial.print(F(")"));
             Serial.print(F(" Emb="));  Serial.print(eixos[2].valor);
+            Serial.print(F("(")); Serial.print(eixos[2].bruto); Serial.print(F(")"));
             Serial.print(F(" FMao=")); Serial.print(eixos[3].valor);
+            Serial.print(F("(")); Serial.print(eixos[3].bruto); Serial.print(F(")"));
             Serial.print(F(" Btn="));
             for (int i = 0; i < NUM_BOTOES; i++) {
                 Serial.print(estadoAnterior[i] ? "1" : "0");
