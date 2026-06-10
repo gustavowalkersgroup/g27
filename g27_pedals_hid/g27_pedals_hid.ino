@@ -274,10 +274,8 @@ void loop() {
     for (int i = 0; i < NUM_BOTOES; i++) {
         // LOW = chave fechada (pressionada) por causa do pull-up
         bool pressionado = (digitalRead(PINOS_BOTOES[i]) == LOW);
-        if (pressionado != estadoAnterior[i]) {
-            joystick.setButton(i, pressionado);
-            estadoAnterior[i] = pressionado;
-        }
+        joystick.setButton(i, pressionado);
+        estadoAnterior[i] = pressionado;
     }
 
     // ── 3. Envia relatório HID ────────────────────────────────────
