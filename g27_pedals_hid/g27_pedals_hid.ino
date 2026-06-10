@@ -88,12 +88,14 @@ const int JOYSTICK_MAX = 1023;
 //         ruído/vazamento — pode "misturar" os eixos).
 const bool CALIBRACAO_AUTO = false;
 
-// Faixas fixas do modo manual (valores BRUTOS do ADC, 0–1023).
-// Faixa generosa que funciona com a maioria dos pedais G27; leituras
-// fora dela são apenas saturadas no extremo. Para curso exato, meça
-// com DEBUG_SERIAL e ajuste. Ordem: Acel, Freio, Embreagem, F. Mão.
-const int CAL_MIN[4] = {  60,  60,  60,  60 };
-const int CAL_MAX[4] = { 960, 960, 960, 960 };
+// Faixas fixas do modo manual (valores BRUTOS do ADC, 0–1023),
+// medidas no Monitor Serial com cada pedal solto e pisado.
+// ATENÇÃO: estes valores estão muito baixos para um pot alimentado
+// com 5V (repouso deveria ler ~950). Verifique o fio de VCC dos
+// potenciômetros; com a fiação corrigida, meça de novo e atualize.
+// Ordem: Acel, Freio, Embreagem, F. Mão.
+const int CAL_MIN[4] = { 140,  90,  29,  60 };
+const int CAL_MAX[4] = { 390, 155,  42, 960 };
 
 // Parâmetros do modo automático:
 // SPAN_MINIMO: curso mínimo (contagens ADC) para considerar o eixo
@@ -105,7 +107,9 @@ const float MARGEM_PCT = 0.03;
 
 // ── Filtro de média móvel ────────────────────────────────────────
 // Aumentar AMOSTRAS = mais suave, porém adiciona latência
-const int AMOSTRAS = 4;
+// 8 amostras enquanto as faixas medidas são estreitas (pouco sinal);
+// com a fiação dos pots corrigida, 4 volta a ser suficiente.
+const int AMOSTRAS = 8;
 
 // ── Debug Serial ─────────────────────────────────────────────────
 // true só para diagnóstico; false em uso normal (mais estável)
