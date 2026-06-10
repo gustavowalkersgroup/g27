@@ -1,177 +1,258 @@
 /*
- * G27 Pedals USB - Firmware HID Joystick
+ * G27 Pedals + Freio de Mão + Botões - Firmware HID Joystick
  * Placa: Arduino Pro Micro (ATmega32U4, 5V, 16MHz)
  *
  * Dependência obrigatória (gratuita):
  *   Biblioteca "Joystick" de Matthew Heironimus
- *   Instale via: Sketch → Incluir Biblioteca → Gerenciar Bibliotecas
- *   Pesquise: "Joystick" por "Matthew Heironimus"
- *   URL: https://github.com/MHeironimus/ArduinoJoystickLibrary
+ *   Sketch → Incluir Biblioteca → Gerenciar Bibliotecas → "Joystick"
  *
- * O Windows reconhecerá o dispositivo como "G27 Pedals USB"
- * com três eixos analógicos:
- *   X Axis → Acelerador (A0)
- *   Y Axis → Freio      (A1)
- *   Z Axis → Embreagem  (A2)
+ * ── EIXOS ANALÓGICOS (todos LINEARES, sem X/Y) ────────────────────
+ *   No joy.cpl, X+Y viram um gráfico 2D com cruz. Para cada pedal
+ *   aparecer como uma BARRA independente, usamos só Z/Rx/Ry/Rz.
  *
- * Ligações físicas:
- *   Fio 5V  do conector dos pedais → VCC do Arduino
- *   Fio GND do conector dos pedais → GND do Arduino
- *   Sinal Acelerador               → A0
- *   Sinal Freio                    → A1
- *   Sinal Embreagem                → A2
+ *   A0  →  Eixo Z      (Acelerador)
+ *   A1  →  Rotação X   (Freio)
+ *   A2  →  Rotação Y   (Embreagem)
+ *   A3  →  Rotação Z   (Freio de Mão)
  *
- * Como compilar e gravar:
- *   1. Instale a biblioteca Joystick (instruções acima).
- *   2. Em Ferramentas → Placa, selecione:
- *      "Arduino Leonardo" OU "SparkFun Pro Micro 5V/16MHz"
- *      (o Pro Micro usa o mesmo chip ATmega32U4 do Leonardo).
- *   3. Em Ferramentas → Porta, selecione a porta COM do Pro Micro.
- *   4. Clique em Upload (→).
- *   5. Abra joy.cpl (Win+R → joy.cpl) e confirme "G27 Pedals USB".
+ * ── CALIBRAÇÃO AUTOMÁTICA ─────────────────────────────────────────
+ *   Ao ligar, pise FUNDO em cada pedal uma vez e solte.
+ *   O firmware aprende o mínimo/máximo reais de cada potenciômetro
+ *   e estica a leitura para a faixa completa 0–1023.
+ *   Enquanto um eixo não foi movido, ele fica em 0 (repouso).
  *
- * Como testar no Windows:
- *   1. Win+R → digitar joy.cpl → Enter.
- *   2. Selecionar "G27 Pedals USB" → Propriedades.
- *   3. Mover cada pedal: o cursor deve se mover nos eixos X, Y ou Z.
+ *   Observação sobre 5V vs 3,3V: a leitura é RATIOMÉTRICA — o
+ *   potenciômetro e o ADC usam a mesma referência (VCC), então a
+ *   tensão da placa não distorce os valores. O máximo ficar em ~950
+ *   em vez de 1023 é só porque o braço do pedal não gira o
+ *   potenciômetro até o fim — exatamente o que a calibração corrige.
+ *
+ * ── BOTÕES DIGITAIS ───────────────────────────────────────────────
+ *   Chave mecânica: um terminal no pino, outro terminal no GND.
+ *   Sem resistor externo (usa pull-up interno do Arduino).
+ *
+ *   D2   →  Botão  1       D9   →  Botão  8
+ *   D3   →  Botão  2       D10  →  Botão  9
+ *   D4   →  Botão  3       D14  →  Botão 10
+ *   D5   →  Botão  4       D15  →  Botão 11
+ *   D6   →  Botão  5       D16  →  Botão 12
+ *   D7   →  Botão  6
+ *   D8   →  Botão  7
+ *                                    Total: 12 botões
+ *
+ * ── COMPILAÇÃO ────────────────────────────────────────────────────
+ *   Ferramentas → Placa  → Arduino Leonardo
+ *   Ferramentas → Porta  → COMX (porta do Pro Micro)
+ *   Upload (→)
+ *
+ * ── TESTE ─────────────────────────────────────────────────────────
+ *   Win+R → joy.cpl → Propriedades
+ *   Pise fundo em cada pedal uma vez (calibração) e teste.
  */
 
 #include <Joystick.h>
 
-// ─── Configuração dos pinos ───────────────────────────────────────────────────
-const int PIN_ACELERADOR = A0;
-const int PIN_FREIO      = A1;
-const int PIN_EMBREAGEM  = A2;
+// ── Pinos analógicos ──────────────────────────────────────────────
+const int PIN_ACELERADOR  = A0;
+const int PIN_FREIO       = A1;
+const int PIN_EMBREAGEM   = A2;
+const int PIN_FREIO_MAO   = A3;
 
-// ─── Inversão de eixo ────────────────────────────────────────────────────────
-// Altere para true se o eixo estiver invertido no simulador.
-// (potenciômetros com polaridade invertida)
-const bool INVERTER_ACELERADOR = false;
-const bool INVERTER_FREIO      = false;
-const bool INVERTER_EMBREAGEM  = false;
+// ── Inversão de eixo ─────────────────────────────────────────────
+// Nos pedais G27 o potenciômetro lê ALTO em repouso e BAIXO
+// pressionado, por isso os três começam invertidos (true).
+// O freio de mão depende de como você ligar o potenciômetro;
+// se responder ao contrário, mude para true.
+const bool INVERTER_ACELERADOR = true;
+const bool INVERTER_FREIO      = true;
+const bool INVERTER_EMBREAGEM  = true;
+const bool INVERTER_FREIO_MAO  = false;
 
-// ─── Faixa de saída do joystick ──────────────────────────────────────────────
-// A biblioteca Joystick aceita qualquer faixa inteira.
-// 0–1023 corresponde diretamente à resolução ADC de 10 bits.
+// ── Pinos dos botões ─────────────────────────────────────────────
+const int NUM_BOTOES = 12;
+const int PINOS_BOTOES[NUM_BOTOES] = {2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16};
+
+// ── Faixa de saída dos eixos ──────────────────────────────────────
 const int JOYSTICK_MIN = 0;
 const int JOYSTICK_MAX = 1023;
 
-// ─── Filtro de média móvel ────────────────────────────────────────────────────
-// Suaviza leituras ruidosas dos potenciômetros.
-// Aumente AMOSTRAS para mais suavidade (mas adiciona latência).
+// ── Calibração automática ────────────────────────────────────────
+// SPAN_MINIMO: curso mínimo (em contagens ADC) para considerar o
+// eixo calibrado. Evita que ruído de um eixo parado "calibre" uma
+// faixa minúscula e faça o valor pular de 0 a 1023 com qualquer
+// tremida. Antes de calibrar, o eixo fica fixo em 0 (repouso).
+const int SPAN_MINIMO = 100;
+// MARGEM_PCT: porcentagem cortada em cada extremidade da faixa
+// aprendida, garantindo que o pedal alcance 0 e 1023 com folga.
+const float MARGEM_PCT = 0.03;
+
+// ── Filtro de média móvel ────────────────────────────────────────
+// Aumentar AMOSTRAS = mais suave, porém adiciona latência
 const int AMOSTRAS = 4;
 
-// Buffers circulares para média móvel de cada eixo
-int bufAcel[AMOSTRAS]  = {0};
-int bufFreio[AMOSTRAS] = {0};
-int bufEmb[AMOSTRAS]   = {0};
-int idxBuf = 0;  // índice atual no buffer circular
-
-// ─── Debug Serial ─────────────────────────────────────────────────────────────
-// Habilite true para ver valores no Monitor Serial (útil na primeira
-// configuração). Desabilite em uso normal para reduzir overhead.
-const bool DEBUG_SERIAL = true;
+// ── Debug Serial ─────────────────────────────────────────────────
+// true só para diagnóstico; false em uso normal (mais estável)
+const bool DEBUG_SERIAL = false;
 const unsigned long DEBUG_INTERVALO_MS = 100;
 unsigned long ultimoDebug = 0;
 
-// ─── Instância do joystick ────────────────────────────────────────────────────
-// Parâmetros: ID HID, tipo JOYSTICK_TYPE_JOYSTICK, botões, hat switches,
-// habilitar X, Y, Z, Rx, Ry, Rz, rudder, throttle, acelerador, freio, steering
+// ── Estrutura de cada eixo: filtro + calibração ──────────────────
+struct Eixo {
+    int  pino;       // pino analógico
+    bool inverter;   // inverte o sentido após calibrar
+    int  buf[AMOSTRAS];
+    int  minObs;     // menor valor já observado
+    int  maxObs;     // maior valor já observado
+    int  valor;      // saída final 0–1023
+};
+
+Eixo eixos[4] = {
+    { PIN_ACELERADOR, INVERTER_ACELERADOR, {0}, 1023, 0, 0 },
+    { PIN_FREIO,      INVERTER_FREIO,      {0}, 1023, 0, 0 },
+    { PIN_EMBREAGEM,  INVERTER_EMBREAGEM,  {0}, 1023, 0, 0 },
+    { PIN_FREIO_MAO,  INVERTER_FREIO_MAO,  {0}, 1023, 0, 0 },
+};
+
+int idxBuf = 0;
+
+// ── Instância do joystick ────────────────────────────────────────
+// Parâmetros: ID, tipo, botões, hats, X, Y, Z, Rx, Ry, Rz, rudder,
+//             throttle, accel, brake, steering
+// X e Y DESABILITADOS de propósito: assim nenhum pedal entra no
+// gráfico 2D do joy.cpl — todos aparecem como barras lineares.
 Joystick_ joystick(
-    JOYSTICK_DEFAULT_REPORT_ID,  // ID padrão HID
-    JOYSTICK_TYPE_JOYSTICK,      // tipo: joystick genérico
-    0,                           // 0 botões
-    0,                           // 0 hat switches
-    true,                        // eixo X  → Acelerador
-    true,                        // eixo Y  → Freio
-    true,                        // eixo Z  → Embreagem
-    false,                       // sem Rx
-    false,                       // sem Ry
-    false,                       // sem Rz
-    false,                       // sem rudder
-    false,                       // sem throttle
-    false,                       // sem acelerador dedicado
-    false,                       // sem freio dedicado
-    false                        // sem steering dedicado
+    JOYSTICK_DEFAULT_REPORT_ID,
+    JOYSTICK_TYPE_JOYSTICK,
+    NUM_BOTOES,   // 12 botões
+    0,            // sem hat switch
+    false,        // X  desabilitado
+    false,        // Y  desabilitado
+    true,         // Z  → Acelerador
+    true,         // Rx → Freio
+    true,         // Ry → Embreagem
+    true,         // Rz → Freio de Mão
+    false,
+    false,
+    false,
+    false,
+    false
 );
 
-// ─── setup ────────────────────────────────────────────────────────────────────
+// ── Debounce dos botões ──────────────────────────────────────────
+bool estadoAnterior[NUM_BOTOES] = {false};
+
 void setup() {
-    if (DEBUG_SERIAL) {
-        Serial.begin(115200);
-        // Aguarda conexão USB (necessário no ATmega32U4)
-        unsigned long inicio = millis();
-        while (!Serial && millis() - inicio < 3000) {
-            ; // timeout de 3s para não travar sem Monitor Serial aberto
-        }
-        Serial.println(F("G27 Pedals USB - iniciando..."));
+    // Configura pinos dos botões com pull-up interno
+    // (chave fecha para GND → leitura LOW = pressionado)
+    for (int i = 0; i < NUM_BOTOES; i++) {
+        pinMode(PINOS_BOTOES[i], INPUT_PULLUP);
     }
 
-    // Define a faixa de cada eixo para que a biblioteca normalize corretamente
-    joystick.setXAxisRange(JOYSTICK_MIN, JOYSTICK_MAX);
-    joystick.setYAxisRange(JOYSTICK_MIN, JOYSTICK_MAX);
+    if (DEBUG_SERIAL) {
+        Serial.begin(115200);
+        unsigned long inicio = millis();
+        while (!Serial && millis() - inicio < 3000) { ; }
+        Serial.println(F("G27 Controller - iniciando..."));
+    }
+
+    // Define faixa de cada eixo
     joystick.setZAxisRange(JOYSTICK_MIN, JOYSTICK_MAX);
+    joystick.setRxAxisRange(JOYSTICK_MIN, JOYSTICK_MAX);
+    joystick.setRyAxisRange(JOYSTICK_MIN, JOYSTICK_MAX);
+    joystick.setRzAxisRange(JOYSTICK_MIN, JOYSTICK_MAX);
 
-    // Inicia o dispositivo HID; true = envia relatório automaticamente
-    joystick.begin(false);  // false = controle manual do envio (mais eficiente)
+    joystick.begin(false); // false = envio manual via sendState()
 
-    // Pré-popula os buffers com a leitura inicial para evitar spike no boot
-    for (int i = 0; i < AMOSTRAS; i++) {
-        bufAcel[i]  = analogRead(PIN_ACELERADOR);
-        bufFreio[i] = analogRead(PIN_FREIO);
-        bufEmb[i]   = analogRead(PIN_EMBREAGEM);
+    // Pré-popula buffers e inicia min/max na leitura atual,
+    // assim a calibração parte do ponto de repouso real
+    for (int e = 0; e < 4; e++) {
+        int leitura = analogRead(eixos[e].pino);
+        for (int i = 0; i < AMOSTRAS; i++) {
+            eixos[e].buf[i] = leitura;
+        }
+        eixos[e].minObs = leitura;
+        eixos[e].maxObs = leitura;
     }
 }
 
-// ─── loop ─────────────────────────────────────────────────────────────────────
-void loop() {
-    // 1. Lê os potenciômetros
-    int rawAcel  = analogRead(PIN_ACELERADOR);
-    int rawFreio = analogRead(PIN_FREIO);
-    int rawEmb   = analogRead(PIN_EMBREAGEM);
+/*
+ * Processa um eixo: filtra, atualiza calibração e converte a
+ * leitura bruta para a faixa completa 0–1023.
+ */
+void processarEixo(Eixo &e) {
+    // 1. Média móvel
+    e.buf[idxBuf] = analogRead(e.pino);
+    long soma = 0;
+    for (int i = 0; i < AMOSTRAS; i++) soma += e.buf[i];
+    int filtrado = soma / AMOSTRAS;
 
-    // 2. Insere no buffer circular (média móvel)
-    bufAcel[idxBuf]  = rawAcel;
-    bufFreio[idxBuf] = rawFreio;
-    bufEmb[idxBuf]   = rawEmb;
+    // 2. Atualiza limites aprendidos
+    if (filtrado < e.minObs) e.minObs = filtrado;
+    if (filtrado > e.maxObs) e.maxObs = filtrado;
+
+    int span = e.maxObs - e.minObs;
+
+    // 3. Eixo ainda não movido o suficiente → mantém em repouso (0)
+    if (span < SPAN_MINIMO) {
+        e.valor = 0;
+        return;
+    }
+
+    // 4. Corta margem nas extremidades para garantir fundo de escala
+    int margem = (int)(span * MARGEM_PCT);
+    int lo = e.minObs + margem;
+    int hi = e.maxObs - margem;
+
+    int v = constrain(filtrado, lo, hi);
+    v = map(v, lo, hi, JOYSTICK_MIN, JOYSTICK_MAX);
+
+    // 5. Inversão de sentido (repouso = 0, fundo = 1023)
+    if (e.inverter) v = JOYSTICK_MAX - v;
+
+    e.valor = v;
+}
+
+void loop() {
+    // ── 1. Processa os 4 eixos (filtro + calibração + inversão) ──
+    for (int e = 0; e < 4; e++) {
+        processarEixo(eixos[e]);
+    }
     idxBuf = (idxBuf + 1) % AMOSTRAS;
 
-    // 3. Calcula a média de cada buffer
-    long somaAcel = 0, somaFreio = 0, somaEmb = 0;
-    for (int i = 0; i < AMOSTRAS; i++) {
-        somaAcel  += bufAcel[i];
-        somaFreio += bufFreio[i];
-        somaEmb   += bufEmb[i];
+    joystick.setZAxis(eixos[0].valor);   // Acelerador
+    joystick.setRxAxis(eixos[1].valor);  // Freio
+    joystick.setRyAxis(eixos[2].valor);  // Embreagem
+    joystick.setRzAxis(eixos[3].valor);  // Freio de Mão
+
+    // ── 2. Leitura dos botões ─────────────────────────────────────
+    for (int i = 0; i < NUM_BOTOES; i++) {
+        // LOW = chave fechada (pressionada) por causa do pull-up
+        bool pressionado = (digitalRead(PINOS_BOTOES[i]) == LOW);
+        if (pressionado != estadoAnterior[i]) {
+            joystick.setButton(i, pressionado);
+            estadoAnterior[i] = pressionado;
+        }
     }
-    int filtAcel  = somaAcel  / AMOSTRAS;
-    int filtFreio = somaFreio / AMOSTRAS;
-    int filtEmb   = somaEmb   / AMOSTRAS;
 
-    // 4. Aplica inversão de eixo se configurado
-    int valX = INVERTER_ACELERADOR ? (JOYSTICK_MAX - filtAcel)  : filtAcel;
-    int valY = INVERTER_FREIO      ? (JOYSTICK_MAX - filtFreio) : filtFreio;
-    int valZ = INVERTER_EMBREAGEM  ? (JOYSTICK_MAX - filtEmb)   : filtEmb;
+    // ── 3. Envia relatório HID ────────────────────────────────────
+    joystick.sendState();
 
-    // 5. Atualiza os eixos e envia o relatório HID
-    joystick.setXAxis(valX);
-    joystick.setYAxis(valY);
-    joystick.setZAxis(valZ);
-    joystick.sendState();  // envia somente quando chamamos explicitamente
-
-    // 6. Saída de debug no Monitor Serial (opcional)
+    // ── 4. Debug Serial ───────────────────────────────────────────
     if (DEBUG_SERIAL) {
         unsigned long agora = millis();
         if (agora - ultimoDebug >= DEBUG_INTERVALO_MS) {
             ultimoDebug = agora;
-            Serial.print(F("Acel="));
-            Serial.print(valX);
-            Serial.print(F("  Freio="));
-            Serial.print(valY);
-            Serial.print(F("  Emb="));
-            Serial.println(valZ);
+            Serial.print(F("Acel="));  Serial.print(eixos[0].valor);
+            Serial.print(F(" Freio=")); Serial.print(eixos[1].valor);
+            Serial.print(F(" Emb="));  Serial.print(eixos[2].valor);
+            Serial.print(F(" FMao=")); Serial.print(eixos[3].valor);
+            Serial.print(F(" Btn="));
+            for (int i = 0; i < NUM_BOTOES; i++) {
+                Serial.print(estadoAnterior[i] ? "1" : "0");
+            }
+            Serial.println();
         }
     }
 
-    // Pequena pausa para não saturar o barramento USB
     delay(5);
 }

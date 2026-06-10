@@ -93,3 +93,7 @@ A2   | Embreagem   |  895 |   0  | 1023  [#################...]
 - Biblioteca Joystick v2.x (Matthew Heironimus)
 - Windows 10/11 — `joy.cpl`
 - Simuladores: Assetto Corsa, iRacing, rFactor, BeamNG, etc.
+
+## Notas de versão
+
+- v1.0 — firmware inicial
