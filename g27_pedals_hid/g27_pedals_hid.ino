@@ -68,7 +68,7 @@ int idxBuf = 0;
 
 // ── Debug Serial ─────────────────────────────────────────────────
 // false em uso normal para reduzir overhead
-const bool DEBUG_SERIAL = true;
+const bool DEBUG_SERIAL = false;
 const unsigned long DEBUG_INTERVALO_MS = 100;
 unsigned long ultimoDebug = 0;
 
