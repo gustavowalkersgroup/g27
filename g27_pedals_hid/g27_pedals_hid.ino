@@ -88,14 +88,12 @@ const int JOYSTICK_MAX = 1023;
 //         ruído/vazamento — pode "misturar" os eixos).
 const bool CALIBRACAO_AUTO = false;
 
-// Faixas fixas do modo manual (valores BRUTOS do ADC, 0–1023),
-// medidas no Monitor Serial com cada pedal solto e pisado.
-// ATENÇÃO: estes valores estão muito baixos para um pot alimentado
-// com 5V (repouso deveria ler ~950). Verifique o fio de VCC dos
-// potenciômetros; com a fiação corrigida, meça de novo e atualize.
-// Ordem: Acel, Freio, Embreagem, F. Mão.
-const int CAL_MIN[4] = { 140,  90,  29,  60 };
-const int CAL_MAX[4] = { 390, 155,  42, 960 };
+// Faixas fixas do modo manual (valores BRUTOS do ADC, 0–1023).
+// Faixa generosa de partida; rode o calibracao/calibrar.py (funciona
+// com este firmware, sem regravar) e cole aqui os valores sugeridos.
+// Ordem: Acel, Freio, Embreagem, F. Mão (A3 em GND → fica em 0).
+const int CAL_MIN[4] = {  60,  60,  60,  60 };
+const int CAL_MAX[4] = { 960, 960, 960, 960 };
 
 // Parâmetros do modo automático:
 // SPAN_MINIMO: curso mínimo (contagens ADC) para considerar o eixo
@@ -107,14 +105,15 @@ const float MARGEM_PCT = 0.03;
 
 // ── Filtro de média móvel ────────────────────────────────────────
 // Aumentar AMOSTRAS = mais suave, porém adiciona latência
-// 8 amostras enquanto as faixas medidas são estreitas (pouco sinal);
-// com a fiação dos pots corrigida, 4 volta a ser suficiente.
-const int AMOSTRAS = 8;
+const int AMOSTRAS = 4;
 
-// ── Debug Serial ─────────────────────────────────────────────────
-// true só para diagnóstico; false em uso normal (mais estável)
-const bool DEBUG_SERIAL = false;
-const unsigned long DEBUG_INTERVALO_MS = 100;
+// ── Serial de diagnóstico (convive com o HID) ────────────────────
+// Emite "RAW,millis,A0,A1,A2,A3" a cada 20 ms — o mesmo formato do
+// sketch diagnostico_serial, então o calibracao/calibrar.py funciona
+// com o joystick ativo, sem regravar firmware. Não bloqueia o boot:
+// se nenhum monitor/script abrir a porta, o HID roda normalmente.
+const bool DEBUG_SERIAL = true;
+const unsigned long DEBUG_INTERVALO_MS = 20;
 unsigned long ultimoDebug = 0;
 
 // ── Estrutura de cada eixo: filtro + calibração ──────────────────
@@ -171,10 +170,9 @@ void setup() {
     }
 
     if (DEBUG_SERIAL) {
+        // NÃO espera a porta abrir (while !Serial travaria o HID
+        // quando nenhum monitor estiver conectado)
         Serial.begin(115200);
-        unsigned long inicio = millis();
-        while (!Serial && millis() - inicio < 3000) { ; }
-        Serial.println(F("G27 Controller - iniciando..."));
     }
 
     // Define faixa de cada eixo
@@ -282,21 +280,18 @@ void loop() {
     joystick.sendState();
 
     // ── 4. Debug Serial ───────────────────────────────────────────
-    if (DEBUG_SERIAL) {
+    // Formato compatível com calibracao/calibrar.py. Só transmite
+    // se a porta estiver aberta (Serial avalia o estado do DTR),
+    // evitando trabalho extra durante o uso normal como joystick.
+    if (DEBUG_SERIAL && Serial) {
         unsigned long agora = millis();
         if (agora - ultimoDebug >= DEBUG_INTERVALO_MS) {
             ultimoDebug = agora;
-            Serial.print(F("Acel="));  Serial.print(eixos[0].valor);
-            Serial.print(F("(")); Serial.print(eixos[0].bruto); Serial.print(F(")"));
-            Serial.print(F(" Freio=")); Serial.print(eixos[1].valor);
-            Serial.print(F("(")); Serial.print(eixos[1].bruto); Serial.print(F(")"));
-            Serial.print(F(" Emb="));  Serial.print(eixos[2].valor);
-            Serial.print(F("(")); Serial.print(eixos[2].bruto); Serial.print(F(")"));
-            Serial.print(F(" FMao=")); Serial.print(eixos[3].valor);
-            Serial.print(F("(")); Serial.print(eixos[3].bruto); Serial.print(F(")"));
-            Serial.print(F(" Btn="));
-            for (int i = 0; i < NUM_BOTOES; i++) {
-                Serial.print(estadoAnterior[i] ? "1" : "0");
+            Serial.print(F("RAW,"));
+            Serial.print(agora);
+            for (int e = 0; e < 4; e++) {
+                Serial.print(',');
+                Serial.print(eixos[e].bruto);
             }
             Serial.println();
         }
