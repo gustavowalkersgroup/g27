@@ -6,23 +6,38 @@
  *   Biblioteca "Joystick" de Matthew Heironimus
  *   Sketch → Incluir Biblioteca → Gerenciar Bibliotecas → "Joystick"
  *
- * ── EIXOS ANALÓGICOS ──────────────────────────────────────────────
- *   A0  →  X Axis   (Acelerador)
- *   A1  →  Y Axis   (Freio)
- *   A2  →  Z Axis   (Embreagem)
- *   A3  →  Rx Axis  (Freio de Mão)
+ * ── EIXOS ANALÓGICOS (todos LINEARES, sem X/Y) ────────────────────
+ *   No joy.cpl, X+Y viram um gráfico 2D com cruz. Para cada pedal
+ *   aparecer como uma BARRA independente, usamos só Z/Rx/Ry/Rz.
+ *
+ *   A0  →  Eixo Z      (Acelerador)
+ *   A1  →  Rotação X   (Freio)
+ *   A2  →  Rotação Y   (Embreagem)
+ *   A3  →  Rotação Z   (Freio de Mão)
+ *
+ * ── CALIBRAÇÃO AUTOMÁTICA ─────────────────────────────────────────
+ *   Ao ligar, pise FUNDO em cada pedal uma vez e solte.
+ *   O firmware aprende o mínimo/máximo reais de cada potenciômetro
+ *   e estica a leitura para a faixa completa 0–1023.
+ *   Enquanto um eixo não foi movido, ele fica em 0 (repouso).
+ *
+ *   Observação sobre 5V vs 3,3V: a leitura é RATIOMÉTRICA — o
+ *   potenciômetro e o ADC usam a mesma referência (VCC), então a
+ *   tensão da placa não distorce os valores. O máximo ficar em ~950
+ *   em vez de 1023 é só porque o braço do pedal não gira o
+ *   potenciômetro até o fim — exatamente o que a calibração corrige.
  *
  * ── BOTÕES DIGITAIS ───────────────────────────────────────────────
  *   Chave mecânica: um terminal no pino, outro terminal no GND.
  *   Sem resistor externo (usa pull-up interno do Arduino).
  *
- *   D2   →  Botão  0       D9   →  Botão  7
- *   D3   →  Botão  1       D10  →  Botão  8
- *   D4   →  Botão  2       D14  →  Botão  9
- *   D5   →  Botão  3       D15  →  Botão 10
- *   D6   →  Botão  4       D16  →  Botão 11
- *   D7   →  Botão  5
- *   D8   →  Botão  6
+ *   D2   →  Botão  1       D9   →  Botão  8
+ *   D3   →  Botão  2       D10  →  Botão  9
+ *   D4   →  Botão  3       D14  →  Botão 10
+ *   D5   →  Botão  4       D15  →  Botão 11
+ *   D6   →  Botão  5       D16  →  Botão 12
+ *   D7   →  Botão  6
+ *   D8   →  Botão  7
  *                                    Total: 12 botões
  *
  * ── COMPILAÇÃO ────────────────────────────────────────────────────
@@ -31,7 +46,8 @@
  *   Upload (→)
  *
  * ── TESTE ─────────────────────────────────────────────────────────
- *   Win+R → joy.cpl → G27 Controller → Propriedades
+ *   Win+R → joy.cpl → Propriedades
+ *   Pise fundo em cada pedal uma vez (calibração) e teste.
  */
 
 #include <Joystick.h>
@@ -43,10 +59,13 @@ const int PIN_EMBREAGEM   = A2;
 const int PIN_FREIO_MAO   = A3;
 
 // ── Inversão de eixo ─────────────────────────────────────────────
-// true = inverte o sentido (útil se o pedal responde ao contrário)
-const bool INVERTER_ACELERADOR = false;
-const bool INVERTER_FREIO      = false;
-const bool INVERTER_EMBREAGEM  = false;
+// Nos pedais G27 o potenciômetro lê ALTO em repouso e BAIXO
+// pressionado, por isso os três começam invertidos (true).
+// O freio de mão depende de como você ligar o potenciômetro;
+// se responder ao contrário, mude para true.
+const bool INVERTER_ACELERADOR = true;
+const bool INVERTER_FREIO      = true;
+const bool INVERTER_EMBREAGEM  = true;
 const bool INVERTER_FREIO_MAO  = false;
 
 // ── Pinos dos botões ─────────────────────────────────────────────
@@ -57,35 +76,61 @@ const int PINOS_BOTOES[NUM_BOTOES] = {2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16};
 const int JOYSTICK_MIN = 0;
 const int JOYSTICK_MAX = 1023;
 
+// ── Calibração automática ────────────────────────────────────────
+// SPAN_MINIMO: curso mínimo (em contagens ADC) para considerar o
+// eixo calibrado. Evita que ruído de um eixo parado "calibre" uma
+// faixa minúscula e faça o valor pular de 0 a 1023 com qualquer
+// tremida. Antes de calibrar, o eixo fica fixo em 0 (repouso).
+const int SPAN_MINIMO = 100;
+// MARGEM_PCT: porcentagem cortada em cada extremidade da faixa
+// aprendida, garantindo que o pedal alcance 0 e 1023 com folga.
+const float MARGEM_PCT = 0.03;
+
 // ── Filtro de média móvel ────────────────────────────────────────
 // Aumentar AMOSTRAS = mais suave, porém adiciona latência
 const int AMOSTRAS = 4;
-int bufAcel[AMOSTRAS]  = {0};
-int bufFreio[AMOSTRAS] = {0};
-int bufEmb[AMOSTRAS]   = {0};
-int bufFMao[AMOSTRAS]  = {0};
-int idxBuf = 0;
 
 // ── Debug Serial ─────────────────────────────────────────────────
-// false em uso normal para reduzir overhead
+// true só para diagnóstico; false em uso normal (mais estável)
 const bool DEBUG_SERIAL = false;
 const unsigned long DEBUG_INTERVALO_MS = 100;
 unsigned long ultimoDebug = 0;
 
+// ── Estrutura de cada eixo: filtro + calibração ──────────────────
+struct Eixo {
+    int  pino;       // pino analógico
+    bool inverter;   // inverte o sentido após calibrar
+    int  buf[AMOSTRAS];
+    int  minObs;     // menor valor já observado
+    int  maxObs;     // maior valor já observado
+    int  valor;      // saída final 0–1023
+};
+
+Eixo eixos[4] = {
+    { PIN_ACELERADOR, INVERTER_ACELERADOR, {0}, 1023, 0, 0 },
+    { PIN_FREIO,      INVERTER_FREIO,      {0}, 1023, 0, 0 },
+    { PIN_EMBREAGEM,  INVERTER_EMBREAGEM,  {0}, 1023, 0, 0 },
+    { PIN_FREIO_MAO,  INVERTER_FREIO_MAO,  {0}, 1023, 0, 0 },
+};
+
+int idxBuf = 0;
+
 // ── Instância do joystick ────────────────────────────────────────
 // Parâmetros: ID, tipo, botões, hats, X, Y, Z, Rx, Ry, Rz, rudder,
 //             throttle, accel, brake, steering
+// X e Y DESABILITADOS de propósito: assim nenhum pedal entra no
+// gráfico 2D do joy.cpl — todos aparecem como barras lineares.
 Joystick_ joystick(
     JOYSTICK_DEFAULT_REPORT_ID,
     JOYSTICK_TYPE_JOYSTICK,
     NUM_BOTOES,   // 12 botões
     0,            // sem hat switch
-    true,         // X  → Acelerador
-    true,         // Y  → Freio
-    true,         // Z  → Embreagem
-    true,         // Rx → Freio de Mão
-    false,
-    false,
+    false,        // X  desabilitado
+    false,        // Y  desabilitado
+    true,         // Z  → Acelerador
+    true,         // Rx → Freio
+    true,         // Ry → Embreagem
+    true,         // Rz → Freio de Mão
     false,
     false,
     false,
@@ -111,54 +156,75 @@ void setup() {
     }
 
     // Define faixa de cada eixo
-    joystick.setXAxisRange(JOYSTICK_MIN, JOYSTICK_MAX);
-    joystick.setYAxisRange(JOYSTICK_MIN, JOYSTICK_MAX);
     joystick.setZAxisRange(JOYSTICK_MIN, JOYSTICK_MAX);
     joystick.setRxAxisRange(JOYSTICK_MIN, JOYSTICK_MAX);
+    joystick.setRyAxisRange(JOYSTICK_MIN, JOYSTICK_MAX);
+    joystick.setRzAxisRange(JOYSTICK_MIN, JOYSTICK_MAX);
 
     joystick.begin(false); // false = envio manual via sendState()
 
-    // Pré-popula buffers com leitura inicial para evitar spike
-    for (int i = 0; i < AMOSTRAS; i++) {
-        bufAcel[i]  = analogRead(PIN_ACELERADOR);
-        bufFreio[i] = analogRead(PIN_FREIO);
-        bufEmb[i]   = analogRead(PIN_EMBREAGEM);
-        bufFMao[i]  = analogRead(PIN_FREIO_MAO);
+    // Pré-popula buffers e inicia min/max na leitura atual,
+    // assim a calibração parte do ponto de repouso real
+    for (int e = 0; e < 4; e++) {
+        int leitura = analogRead(eixos[e].pino);
+        for (int i = 0; i < AMOSTRAS; i++) {
+            eixos[e].buf[i] = leitura;
+        }
+        eixos[e].minObs = leitura;
+        eixos[e].maxObs = leitura;
     }
 }
 
+/*
+ * Processa um eixo: filtra, atualiza calibração e converte a
+ * leitura bruta para a faixa completa 0–1023.
+ */
+void processarEixo(Eixo &e) {
+    // 1. Média móvel
+    e.buf[idxBuf] = analogRead(e.pino);
+    long soma = 0;
+    for (int i = 0; i < AMOSTRAS; i++) soma += e.buf[i];
+    int filtrado = soma / AMOSTRAS;
+
+    // 2. Atualiza limites aprendidos
+    if (filtrado < e.minObs) e.minObs = filtrado;
+    if (filtrado > e.maxObs) e.maxObs = filtrado;
+
+    int span = e.maxObs - e.minObs;
+
+    // 3. Eixo ainda não movido o suficiente → mantém em repouso (0)
+    if (span < SPAN_MINIMO) {
+        e.valor = 0;
+        return;
+    }
+
+    // 4. Corta margem nas extremidades para garantir fundo de escala
+    int margem = (int)(span * MARGEM_PCT);
+    int lo = e.minObs + margem;
+    int hi = e.maxObs - margem;
+
+    int v = constrain(filtrado, lo, hi);
+    v = map(v, lo, hi, JOYSTICK_MIN, JOYSTICK_MAX);
+
+    // 5. Inversão de sentido (repouso = 0, fundo = 1023)
+    if (e.inverter) v = JOYSTICK_MAX - v;
+
+    e.valor = v;
+}
+
 void loop() {
-    // ── 1. Leitura analógica ──────────────────────────────────────
-    bufAcel[idxBuf]  = analogRead(PIN_ACELERADOR);
-    bufFreio[idxBuf] = analogRead(PIN_FREIO);
-    bufEmb[idxBuf]   = analogRead(PIN_EMBREAGEM);
-    bufFMao[idxBuf]  = analogRead(PIN_FREIO_MAO);
+    // ── 1. Processa os 4 eixos (filtro + calibração + inversão) ──
+    for (int e = 0; e < 4; e++) {
+        processarEixo(eixos[e]);
+    }
     idxBuf = (idxBuf + 1) % AMOSTRAS;
 
-    long sA = 0, sF = 0, sE = 0, sM = 0;
-    for (int i = 0; i < AMOSTRAS; i++) {
-        sA += bufAcel[i];
-        sF += bufFreio[i];
-        sE += bufEmb[i];
-        sM += bufFMao[i];
-    }
-    int valX = sA / AMOSTRAS;
-    int valY = sF / AMOSTRAS;
-    int valZ = sE / AMOSTRAS;
-    int valRx = sM / AMOSTRAS;
+    joystick.setZAxis(eixos[0].valor);   // Acelerador
+    joystick.setRxAxis(eixos[1].valor);  // Freio
+    joystick.setRyAxis(eixos[2].valor);  // Embreagem
+    joystick.setRzAxis(eixos[3].valor);  // Freio de Mão
 
-    // ── 2. Inversão de eixo ───────────────────────────────────────
-    if (INVERTER_ACELERADOR) valX  = JOYSTICK_MAX - valX;
-    if (INVERTER_FREIO)      valY  = JOYSTICK_MAX - valY;
-    if (INVERTER_EMBREAGEM)  valZ  = JOYSTICK_MAX - valZ;
-    if (INVERTER_FREIO_MAO)  valRx = JOYSTICK_MAX - valRx;
-
-    joystick.setXAxis(valX);
-    joystick.setYAxis(valY);
-    joystick.setZAxis(valZ);
-    joystick.setRxAxis(valRx);
-
-    // ── 3. Leitura dos botões ─────────────────────────────────────
+    // ── 2. Leitura dos botões ─────────────────────────────────────
     for (int i = 0; i < NUM_BOTOES; i++) {
         // LOW = chave fechada (pressionada) por causa do pull-up
         bool pressionado = (digitalRead(PINOS_BOTOES[i]) == LOW);
@@ -168,19 +234,18 @@ void loop() {
         }
     }
 
-    // ── 4. Envia relatório HID ────────────────────────────────────
+    // ── 3. Envia relatório HID ────────────────────────────────────
     joystick.sendState();
 
-    // ── 5. Debug Serial ───────────────────────────────────────────
+    // ── 4. Debug Serial ───────────────────────────────────────────
     if (DEBUG_SERIAL) {
         unsigned long agora = millis();
         if (agora - ultimoDebug >= DEBUG_INTERVALO_MS) {
             ultimoDebug = agora;
-            Serial.print(F("Acel="));  Serial.print(valX);
-            Serial.print(F(" Freio=")); Serial.print(valY);
-            Serial.print(F(" Emb="));  Serial.print(valZ);
-            Serial.print(F(" FMao=")); Serial.print(valRx);
-            // Mostra quais botões estão pressionados
+            Serial.print(F("Acel="));  Serial.print(eixos[0].valor);
+            Serial.print(F(" Freio=")); Serial.print(eixos[1].valor);
+            Serial.print(F(" Emb="));  Serial.print(eixos[2].valor);
+            Serial.print(F(" FMao=")); Serial.print(eixos[3].valor);
             Serial.print(F(" Btn="));
             for (int i = 0; i < NUM_BOTOES; i++) {
                 Serial.print(estadoAnterior[i] ? "1" : "0");
